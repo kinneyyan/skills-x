@@ -24,7 +24,16 @@ describe('add command', () => {
     const result = runCli(['add'], testDir);
     expect(result.stdout).toContain('ERROR');
     expect(result.stdout).toContain('Missing required argument: source');
+    expect(result.stdout).toContain('uses default registry');
+    expect(result.stdout).toContain('--all');
     expect(result.exitCode).toBe(1);
+  });
+
+  it('should use default registry when source is missing but flags are present', () => {
+    // We expect it to try to parse the default registry URL
+    const result = runCli(['add', '--list'], testDir);
+    // It should at least mention the registry URL in the "Parsing source..." step
+    expect(result.stdout).toContain('Source: https://github.ab-inbev.cn/Kinney-Yan/prompts.git');
   });
 
   it('should show error for non-existent local path', () => {

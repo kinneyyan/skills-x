@@ -47,6 +47,7 @@ package-lock.json
 .qwen/
 .trae/
 .vscode/
+.codex/
 
 bin/_chunks/
 bin/cli-wrapper.mjs

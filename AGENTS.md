@@ -21,6 +21,14 @@ This file provides guidance to AI coding agents working on the `skills` CLI code
 
 Aliases: `skills a` works for `add`. `skills i`, `skills install` (no args) restore from `skills-lock.json`. `skills ls` works for `list`. `skills experimental_install` restores from `skills-lock.json`. `skills experimental_sync` crawls `node_modules` for skills.
 
+## Default Registry System
+
+The CLI includes a "Default Registry" (curated repository) to simplify skill installation.
+
+- **Configuration**: Defined in `src/constants.ts` via `DEFAULT_REGISTRY_URL` and `DEFAULT_REGISTRY_SUBPATH`.
+- **Curated Skills**: If `skills add` is called with a single alphanumeric word (e.g., `code-review`), `src/source-parser.ts` maps it to the curated repository.
+- **Implicit Source**: If `skills add` is called without a source but with flags (e.g., `skills add --list` or `skills add --all`), `runAdd` in `src/add.ts` automatically defaults to the curated repository.
+
 ## Architecture
 
 ```

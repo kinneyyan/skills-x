@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseSource } from './source-parser.js';
+import { DEFAULT_REGISTRY_SUBPATH, DEFAULT_REGISTRY_URL } from './constants.js';
 
 describe('source-parser', () => {
   describe('GitLab Custom Domains & Subgroups', () => {
@@ -90,6 +91,38 @@ describe('source-parser', () => {
         ref: 'main',
         subpath: 'path',
       });
+    });
+  });
+
+  describe('Default Registry Support', () => {
+    it('parses simple identifiers as default registry skills', () => {
+      const result = parseSource('code-review');
+      expect(result).toEqual({
+        type: 'github',
+        url: DEFAULT_REGISTRY_URL,
+        subpath: DEFAULT_REGISTRY_SUBPATH,
+        skillFilter: 'code-review',
+      });
+    });
+
+    it('parses identifiers with hyphens', () => {
+      const result = parseSource('my-awesome-skill');
+      expect(result).toMatchObject({
+        type: 'github',
+        skillFilter: 'my-awesome-skill',
+      });
+    });
+
+    it('does not match paths starting with .', () => {
+      const result = parseSource('./code-review');
+      expect(result.type).toBe('local');
+    });
+
+    it('does not match owner/repo shorthand', () => {
+      const result = parseSource('owner/repo');
+      expect(result.type).toBe('github');
+      expect(result.url).toBe('https://github.com/owner/repo.git');
+      expect(result.skillFilter).toBeUndefined();
     });
   });
 });

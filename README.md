@@ -9,12 +9,19 @@ Supports **OpenCode**, **Claude Code**, **Codex**, **Cursor**, and [37 more](#av
 ## Install a Skill
 
 ```bash
+# Install a curated skill by name
+npx skills add code-review
+
+# Install from a specific repository
 npx skills add vercel-labs/agent-skills
 ```
 
 ### Source Formats
 
 ```bash
+# Curated skill name (from default registry)
+npx skills add code-review
+
 # GitHub shorthand (owner/repo)
 npx skills add vercel-labs/agent-skills
 
@@ -44,15 +51,21 @@ npx skills add ./my-local-skills
 | `-l, --list`              | List available skills without installing                                                                                                           |
 | `--copy`                  | Copy files instead of symlinking to agent directories                                                                                              |
 | `-y, --yes`               | Skip all confirmation prompts                                                                                                                      |
-| `--all`                   | Install all skills to all agents without prompts                                                                                                   |
+| `--all`                   | Install all skills to all agents without prompts (defaults to curated registry if no source provided)                                              |
 
 ### Examples
 
 ```bash
-# List skills in a repository
+# List all skills in the default curated registry
+npx skills add --list
+
+# List skills in a specific repository
 npx skills add vercel-labs/agent-skills --list
 
-# Install specific skills
+# Install a curated skill
+npx skills add code-review
+
+# Install specific skills from a repo
 npx skills add vercel-labs/agent-skills --skill frontend-design --skill skill-creator
 
 # Install a skill with spaces in the name (must be quoted)
@@ -72,6 +85,12 @@ npx skills add vercel-labs/agent-skills --skill '*' -a claude-code
 
 # Install specific skills to all agents
 npx skills add vercel-labs/agent-skills --agent '*' --skill frontend-design
+
+# Install all curated skills to all agents
+npx skills add --all
+
+# Install all skills from a repo to all agents
+npx skills add vercel-labs/agent-skills --all
 ```
 
 ### Installation Scope

@@ -1,5 +1,6 @@
 import { isAbsolute, resolve } from 'path';
 import type { ParsedSource } from './types.ts';
+import { DEFAULT_REGISTRY_SUBPATH, DEFAULT_REGISTRY_URL } from './constants.ts';
 
 /**
  * Extract owner/repo (or group/subgroup/repo for GitLab) from a parsed source
@@ -262,6 +263,18 @@ export function parseSource(input: string): ParsedSource {
     return {
       type: 'well-known',
       url: input,
+    };
+  }
+
+  // Default registry fallback: handle simple identifiers (e.g., "code-review")
+  // Must be alphanumeric with hyphens, no slashes, colons, or starting with .
+  const identifierMatch = input.match(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i);
+  if (identifierMatch && !input.includes('/') && !input.includes(':') && !input.startsWith('.')) {
+    return {
+      type: 'github',
+      url: DEFAULT_REGISTRY_URL,
+      subpath: DEFAULT_REGISTRY_SUBPATH,
+      skillFilter: input,
     };
   }
 

@@ -58,6 +58,7 @@ import {
   saveSelectedAgents,
 } from './skill-lock.ts';
 import { addSkillToLocalLock, computeSkillFolderHash } from './local-lock.ts';
+import { DEFAULT_REGISTRY_URL } from './constants.ts';
 import type { Skill, AgentType, RemoteSkill } from './types.ts';
 import packageJson from '../package.json' with { type: 'json' };
 export function initTelemetry(version: string): void {
@@ -1550,7 +1551,7 @@ async function handleDirectUrlSkillLegacy(
 }
 
 export async function runAdd(args: string[], options: AddOptions = {}): Promise<void> {
-  const source = args[0];
+  let source = args[0];
   let installTipShown = false;
 
   const showInstallTip = (): void => {
@@ -1562,18 +1563,31 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
   };
 
   if (!source) {
-    console.log();
-    console.log(
-      pc.bgRed(pc.white(pc.bold(' ERROR '))) + ' ' + pc.red('Missing required argument: source')
-    );
-    console.log();
-    console.log(pc.dim('  Usage:'));
-    console.log(`    ${pc.cyan('npx skills add')} ${pc.yellow('<source>')} ${pc.dim('[options]')}`);
-    console.log();
-    console.log(pc.dim('  Example:'));
-    console.log(`    ${pc.cyan('npx skills add')} ${pc.yellow('vercel-labs/agent-skills')}`);
-    console.log();
-    process.exit(1);
+    // If no source is provided, check if any options are set
+    const hasOptions = Object.keys(options).length > 0;
+    if (hasOptions) {
+      // Use the default registry as the implicit source
+      source = DEFAULT_REGISTRY_URL;
+    } else {
+      console.log();
+      console.log(
+        pc.bgRed(pc.white(pc.bold(' ERROR '))) + ' ' + pc.red('Missing required argument: source')
+      );
+      console.log();
+      console.log(pc.dim('  Usage:'));
+      console.log(
+        `    ${pc.cyan('npx skills add')} ${pc.yellow('<source>')} ${pc.dim('[options]')}`
+      );
+      console.log(
+        `    ${pc.cyan('npx skills add')} ${pc.yellow('[options]')} ${pc.dim('(uses default registry)')}`
+      );
+      console.log();
+      console.log(pc.dim('  Example:'));
+      console.log(`    ${pc.cyan('npx skills add')} ${pc.yellow('vercel-labs/agent-skills')}`);
+      console.log(`    ${pc.cyan('npx skills add')} ${pc.yellow('--all')}`);
+      console.log();
+      process.exit(1);
+    }
   }
 
   // --all implies --skill '*' and --agent '*' and -y
