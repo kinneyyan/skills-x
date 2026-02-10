@@ -137,7 +137,7 @@ export function formatNonInteractiveResults(
   const hasApi = apiResults.length > 0;
 
   if (hasDefault) {
-    lines.push(`${DIM}Default registry (Install with${RESET} npx skills add <name>${DIM})${RESET}`);
+    lines.push(`${DIM}Install with${RESET} npx skills add <name>${DIM} (Default registry)${RESET}`);
     lines.push('');
 
     for (const skill of defaultResults) {
@@ -154,7 +154,7 @@ export function formatNonInteractiveResults(
 
   if (hasApi) {
     lines.push(
-      `${DIM}From https://skills.sh (Install with${RESET} npx skills add <owner/repo@skill>${DIM})${RESET}`
+      `${DIM}Install with${RESET} npx skills add <owner/repo@skill>${DIM} (From https://skills.sh)${RESET}`
     );
     lines.push('');
 
