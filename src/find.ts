@@ -1,7 +1,12 @@
+import { basename } from 'path';
 import * as readline from 'readline';
-import { runAdd, parseAddOptions } from './add.ts';
-import { track } from './telemetry.ts';
+import { parseAddOptions, runAdd } from './add.ts';
+import { DEFAULT_REGISTRY_SUBPATH, DEFAULT_REGISTRY_URL } from './constants.ts';
+import { cleanupTempDir, cloneRepo } from './git.ts';
+import { discoverSkills } from './skills.ts';
 import { isRepoPrivate } from './source-parser.ts';
+import { track } from './telemetry.ts';
+import type { Skill } from './types.ts';
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -27,6 +32,18 @@ export interface SearchSkill {
   source: string;
   installs: number;
 }
+
+interface DefaultRegistrySkillResult {
+  kind: 'default';
+  name: string;
+  registryUrl: string;
+}
+
+interface ApiSkillResult extends SearchSkill {
+  kind: 'api';
+}
+
+type FindResult = DefaultRegistrySkillResult | ApiSkillResult;
 
 // Search via API
 export async function searchSkillsAPI(query: string): Promise<SearchSkill[]> {
@@ -56,6 +73,104 @@ export async function searchSkillsAPI(query: string): Promise<SearchSkill[]> {
   }
 }
 
+const DEFAULT_REGISTRY_BRANCH = 'main';
+const DEFAULT_REGISTRY_SOURCE_LABEL = 'default registry';
+
+let defaultRegistrySkillsCache: Skill[] | null = null;
+let defaultRegistrySkillsPromise: Promise<Skill[]> | null = null;
+
+export function matchesDefaultRegistrySkillName(skillName: string, query: string): boolean {
+  return skillName.toLowerCase().includes(query.trim().toLowerCase());
+}
+
+export function buildDefaultRegistrySkillUrl(skillPath: string): string {
+  const registryBase = DEFAULT_REGISTRY_URL.replace(/\.git$/, '');
+  const skillDir = basename(skillPath);
+  return `${registryBase}/tree/${DEFAULT_REGISTRY_BRANCH}/${DEFAULT_REGISTRY_SUBPATH}/${skillDir}`;
+}
+
+async function loadDefaultRegistrySkills(): Promise<Skill[]> {
+  if (defaultRegistrySkillsCache) return defaultRegistrySkillsCache;
+  if (!defaultRegistrySkillsPromise) {
+    defaultRegistrySkillsPromise = (async () => {
+      let tempDir: string | null = null;
+      try {
+        tempDir = await cloneRepo(DEFAULT_REGISTRY_URL);
+        const skills = await discoverSkills(tempDir, DEFAULT_REGISTRY_SUBPATH);
+        defaultRegistrySkillsCache = skills;
+        return skills;
+      } finally {
+        if (tempDir) {
+          await cleanupTempDir(tempDir).catch(() => {});
+        }
+      }
+    })();
+  }
+
+  try {
+    return await defaultRegistrySkillsPromise;
+  } finally {
+    defaultRegistrySkillsPromise = null;
+  }
+}
+
+async function searchDefaultRegistry(query: string): Promise<DefaultRegistrySkillResult[]> {
+  try {
+    const skills = await loadDefaultRegistrySkills();
+    const matches = skills.filter((skill) => matchesDefaultRegistrySkillName(skill.name, query));
+    return matches.map((skill) => ({
+      kind: 'default',
+      name: skill.name,
+      registryUrl: buildDefaultRegistrySkillUrl(skill.path),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function formatNonInteractiveResults(
+  defaultResults: DefaultRegistrySkillResult[],
+  apiResults: SearchSkill[]
+): string[] {
+  const lines: string[] = [];
+  const hasDefault = defaultResults.length > 0;
+  const hasApi = apiResults.length > 0;
+
+  if (hasDefault) {
+    lines.push(`${DIM}Default registry (Install with${RESET} npx skills add <name>${DIM})${RESET}`);
+    lines.push('');
+
+    for (const skill of defaultResults) {
+      lines.push(`${BOLD}${skill.name}${RESET}`);
+      lines.push(`${DIM}└ ${skill.registryUrl}${RESET}`);
+      lines.push('');
+    }
+  }
+
+  if (hasDefault && hasApi) {
+    lines.push(`${DIM}------------------------------${RESET}`);
+    lines.push('');
+  }
+
+  if (hasApi) {
+    lines.push(
+      `${DIM}From https://skills.sh (Install with${RESET} npx skills add <owner/repo@skill>${DIM})${RESET}`
+    );
+    lines.push('');
+
+    for (const skill of apiResults.slice(0, 6)) {
+      const pkg = skill.source || skill.slug;
+      const installs = formatInstalls(skill.installs);
+      const installsBadge = installs ? ` ${CYAN}${installs}${RESET}` : '';
+      lines.push(`${TEXT}${pkg}@${skill.name}${RESET}${installsBadge}`);
+      lines.push(`${DIM}└ https://skills.sh/${skill.slug}${RESET}`);
+      lines.push('');
+    }
+  }
+
+  return lines;
+}
+
 // ANSI escape codes for terminal control
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
@@ -64,8 +179,10 @@ const MOVE_UP = (n: number) => `\x1b[${n}A`;
 const MOVE_TO_COL = (n: number) => `\x1b[${n}G`;
 
 // Custom fzf-style search prompt using raw readline
-async function runSearchPrompt(initialQuery = ''): Promise<SearchSkill | null> {
-  let results: SearchSkill[] = [];
+async function runSearchPrompt(initialQuery = ''): Promise<FindResult | null> {
+  let results: FindResult[] = [];
+  let defaultResults: DefaultRegistrySkillResult[] = [];
+  let apiResults: ApiSkillResult[] = [];
   let selectedIndex = 0;
   let query = initialQuery;
   let loading = false;
@@ -103,27 +220,58 @@ async function runSearchPrompt(initialQuery = ''): Promise<SearchSkill | null> {
     lines.push('');
 
     // Results - keep showing existing results while loading new ones
+    const combinedResults = results;
     if (!query || query.length < 2) {
       lines.push(`${DIM}Start typing to search (min 2 chars)${RESET}`);
-    } else if (results.length === 0 && loading) {
+    } else if (combinedResults.length === 0 && loading) {
       lines.push(`${DIM}Searching...${RESET}`);
-    } else if (results.length === 0) {
+    } else if (combinedResults.length === 0) {
       lines.push(`${DIM}No skills found${RESET}`);
     } else {
       const maxVisible = 8;
-      const visible = results.slice(0, maxVisible);
+      const visible = combinedResults.slice(0, maxVisible);
 
-      for (let i = 0; i < visible.length; i++) {
-        const skill = visible[i]!;
-        const isSelected = i === selectedIndex;
+      let defaultCount = Math.min(defaultResults.length, maxVisible);
+      let visibleIndex = 0;
+
+      if (defaultResults.length > 0) {
+        lines.push(`${DIM}Default registry:${RESET}`);
+      }
+
+      for (let i = 0; i < defaultCount; i++) {
+        const skill = visible[visibleIndex] as DefaultRegistrySkillResult | undefined;
+        if (!skill) break;
+        const isSelected = visibleIndex === selectedIndex;
+        const arrow = isSelected ? `${BOLD}>${RESET}` : ' ';
+        const name = isSelected ? `${BOLD}${skill.name}${RESET}` : `${TEXT}${skill.name}${RESET}`;
+        const source = ` ${DIM}${DEFAULT_REGISTRY_SOURCE_LABEL}${RESET}`;
+        const loadingIndicator = loading && visibleIndex === 0 ? ` ${DIM}...${RESET}` : '';
+
+        lines.push(`  ${arrow} ${name}${source}${loadingIndicator}`);
+        visibleIndex++;
+      }
+
+      if (defaultResults.length > 0 && apiResults.length > 0) {
+        lines.push(`${DIM}------------------------------${RESET}`);
+      }
+
+      if (apiResults.length > 0 && visibleIndex < visible.length) {
+        lines.push(`${DIM}API results:${RESET}`);
+      }
+
+      while (visibleIndex < visible.length) {
+        const skill = visible[visibleIndex] as ApiSkillResult | undefined;
+        if (!skill) break;
+        const isSelected = visibleIndex === selectedIndex;
         const arrow = isSelected ? `${BOLD}>${RESET}` : ' ';
         const name = isSelected ? `${BOLD}${skill.name}${RESET}` : `${TEXT}${skill.name}${RESET}`;
         const source = skill.source ? ` ${DIM}${skill.source}${RESET}` : '';
         const installs = formatInstalls(skill.installs);
         const installsBadge = installs ? ` ${CYAN}${installs}${RESET}` : '';
-        const loadingIndicator = loading && i === 0 ? ` ${DIM}...${RESET}` : '';
+        const loadingIndicator = loading && visibleIndex === 0 ? ` ${DIM}...${RESET}` : '';
 
         lines.push(`  ${arrow} ${name}${source}${installsBadge}${loadingIndicator}`);
+        visibleIndex++;
       }
     }
 
@@ -150,6 +298,8 @@ async function runSearchPrompt(initialQuery = ''): Promise<SearchSkill | null> {
 
     if (!q || q.length < 2) {
       results = [];
+      defaultResults = [];
+      apiResults = [];
       selectedIndex = 0;
       render();
       return;
@@ -165,10 +315,18 @@ async function runSearchPrompt(initialQuery = ''): Promise<SearchSkill | null> {
 
     debounceTimer = setTimeout(async () => {
       try {
-        results = await searchSkillsAPI(q);
+        defaultResults = await searchDefaultRegistry(q);
+        results = [...defaultResults];
+        render();
+
+        const apiResponse = await searchSkillsAPI(q);
+        apiResults = apiResponse.map((skill) => ({ ...skill, kind: 'api' }));
+        results = [...defaultResults, ...apiResults];
         selectedIndex = 0;
       } catch {
         results = [];
+        defaultResults = [];
+        apiResults = [];
       } finally {
         loading = false;
         debounceTimer = null;
@@ -273,31 +431,25 @@ ${DIM}  2) npx skills add <owner/repo@skill>${RESET}`;
 
   // Non-interactive mode: just print results and exit
   if (query) {
-    const results = await searchSkillsAPI(query);
+    const defaultResults = await searchDefaultRegistry(query);
+    const apiResults = await searchSkillsAPI(query);
+    const totalResults = defaultResults.length + apiResults.length;
 
     // Track telemetry for non-interactive search
     track({
       event: 'find',
       query,
-      resultCount: String(results.length),
+      resultCount: String(totalResults),
     });
 
-    if (results.length === 0) {
+    if (totalResults === 0) {
       console.log(`${DIM}No skills found for "${query}"${RESET}`);
       return;
     }
 
-    console.log(`${DIM}Install with${RESET} npx skills add <owner/repo@skill>`);
-    console.log();
-
-    for (const skill of results.slice(0, 6)) {
-      const pkg = skill.source || skill.slug;
-      const installs = formatInstalls(skill.installs);
-      console.log(
-        `${TEXT}${pkg}@${skill.name}${RESET}${installs ? ` ${CYAN}${installs}${RESET}` : ''}`
-      );
-      console.log(`${DIM}└ https://skills.sh/${skill.slug}${RESET}`);
-      console.log();
+    const lines = formatNonInteractiveResults(defaultResults, apiResults);
+    for (const line of lines) {
+      console.log(line);
     }
     return;
   }
@@ -324,26 +476,37 @@ ${DIM}  2) npx skills add <owner/repo@skill>${RESET}`;
   }
 
   // Use source (owner/repo) and skill name for installation
-  const pkg = selected.source || selected.slug;
   const skillName = selected.name;
+  const isDefaultRegistry = selected.kind === 'default';
+  let pkg: string;
+  if (isDefaultRegistry) {
+    pkg = skillName;
+  } else {
+    pkg = selected.source || selected.slug;
+  }
 
   console.log();
   console.log(`${TEXT}Installing ${BOLD}${skillName}${RESET} from ${DIM}${pkg}${RESET}...`);
   console.log();
 
   // Run add directly since we're in the same CLI
-  const { source, options } = parseAddOptions([pkg, '--skill', skillName]);
+  const argsForAdd = isDefaultRegistry ? [pkg] : [pkg, '--skill', skillName];
+  const { source, options } = parseAddOptions(argsForAdd);
   await runAdd(source, options);
 
   console.log();
 
-  const info = getOwnerRepoFromString(pkg);
-  if (info && (await isRepoPublic(info.owner, info.repo))) {
-    console.log(
-      `${DIM}View the skill at${RESET} ${TEXT}https://skills.sh/${selected.slug}${RESET}`
-    );
+  if (isDefaultRegistry) {
+    console.log(`${DIM}View the skill at${RESET} ${TEXT}${selected.registryUrl}${RESET}`);
   } else {
-    console.log(`${DIM}Discover more skills at${RESET} ${TEXT}https://skills.sh${RESET}`);
+    const info = getOwnerRepoFromString(pkg);
+    if (info && (await isRepoPublic(info.owner, info.repo))) {
+      console.log(
+        `${DIM}View the skill at${RESET} ${TEXT}https://skills.sh/${selected.slug}${RESET}`
+      );
+    } else {
+      console.log(`${DIM}Discover more skills at${RESET} ${TEXT}https://skills.sh${RESET}`);
+    }
   }
 
   console.log();
