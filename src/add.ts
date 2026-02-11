@@ -1,10 +1,54 @@
 import * as p from '@clack/prompts';
-import pc from 'picocolors';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
 import { sep } from 'path';
-import { parseSource, getOwnerRepo, parseOwnerRepo, isRepoPrivate } from './source-parser.ts';
-import { searchMultiselect, cancelSymbol } from './prompts/search-multiselect.ts';
+import pc from 'picocolors';
+import packageJson from '../package.json' with { type: 'json' };
+import {
+  agents,
+  detectInstalledAgents,
+  getNonUniversalAgents,
+  getUniversalAgents,
+  isUniversalAgent,
+} from './agents.ts';
+import { discoverCommands, getCommandDisplayName } from './commands.ts';
+import { DEFAULT_COMMANDS_SUBPATH, DEFAULT_REGISTRY_URL } from './constants.ts';
+import { cleanupTempDir, cloneRepo, GitCloneError } from './git.ts';
+import {
+  getCanonicalCommandPath,
+  getCanonicalPath,
+  getInstallPath,
+  installCommandForAgent,
+  installRemoteSkillForAgent,
+  installSkillForAgent,
+  installWellKnownSkillForAgent,
+  isCommandInstalled,
+  isSkillInstalled,
+  type InstallMode,
+} from './installer.ts';
+import { fetchMintlifySkill } from './mintlify.ts';
+import { searchMultiselect } from './prompts/search-multiselect.ts';
+import { findProvider, wellKnownProvider, type WellKnownSkill } from './providers/index.ts';
+import {
+  addSkillToLock,
+  dismissPrompt,
+  fetchSkillFolderHash,
+  getLastSelectedAgents,
+  isPromptDismissed,
+  saveSelectedAgents,
+} from './skill-lock.ts';
+import { addSkillToLocalLock, computeSkillFolderHash } from './local-lock.ts';
+import { discoverSkills, filterSkills, getSkillDisplayName } from './skills.ts';
+import { getOwnerRepo, isRepoPrivate, parseOwnerRepo, parseSource } from './source-parser.ts';
+import {
+  fetchAuditData,
+  setVersion,
+  track,
+  type AuditResponse,
+  type PartnerAudit,
+  type SkillAuditData,
+} from './telemetry.ts';
+import type { AgentType, ParsedSource, RemoteSkill, Skill } from './types.ts';
 
 // Helper to check if a value is a cancel symbol (works with both clack and our custom prompts)
 const isCancelled = (value: unknown): value is symbol => typeof value === 'symbol';
@@ -21,46 +65,6 @@ async function isSourcePrivate(source: string): Promise<boolean | null> {
   }
   return isRepoPrivate(ownerRepo.owner, ownerRepo.repo);
 }
-import { cloneRepo, cleanupTempDir, GitCloneError } from './git.ts';
-import { discoverSkills, getSkillDisplayName, filterSkills } from './skills.ts';
-import {
-  installSkillForAgent,
-  isSkillInstalled,
-  getInstallPath,
-  getCanonicalPath,
-  installRemoteSkillForAgent,
-  installWellKnownSkillForAgent,
-  type InstallMode,
-} from './installer.ts';
-import {
-  detectInstalledAgents,
-  agents,
-  getUniversalAgents,
-  getNonUniversalAgents,
-  isUniversalAgent,
-} from './agents.ts';
-import {
-  track,
-  setVersion,
-  fetchAuditData,
-  type AuditResponse,
-  type SkillAuditData,
-  type PartnerAudit,
-} from './telemetry.ts';
-import { findProvider, wellKnownProvider, type WellKnownSkill } from './providers/index.ts';
-import { fetchMintlifySkill } from './mintlify.ts';
-import {
-  addSkillToLock,
-  fetchSkillFolderHash,
-  isPromptDismissed,
-  dismissPrompt,
-  getLastSelectedAgents,
-  saveSelectedAgents,
-} from './skill-lock.ts';
-import { addSkillToLocalLock, computeSkillFolderHash } from './local-lock.ts';
-import { DEFAULT_REGISTRY_URL } from './constants.ts';
-import type { Skill, AgentType, RemoteSkill } from './types.ts';
-import packageJson from '../package.json' with { type: 'json' };
 export function initTelemetry(version: string): void {
   setVersion(version);
 }
@@ -274,6 +278,40 @@ function buildResultLines(
   return lines;
 }
 
+function getSupportedCommandAgents(): AgentType[] {
+  return (Object.entries(agents) as [AgentType, (typeof agents)[AgentType]][])
+    .filter(([_, config]) => config.commandsDir !== undefined)
+    .map(([type]) => type);
+}
+
+function buildCommandSummaryLines(targetAgents: AgentType[], installMode: InstallMode): string[] {
+  const lines: string[] = [];
+  const agentNames = targetAgents.map((a) => agents[a].displayName);
+  const label = installMode === 'symlink' ? 'symlink →' : 'copy →';
+  lines.push(`  ${pc.dim(label)} ${formatList(agentNames)}`);
+  return lines;
+}
+
+function buildCommandResultLines(
+  results: Array<{
+    agent: string;
+    symlinkFailed?: boolean;
+  }>
+): string[] {
+  const lines: string[] = [];
+  const successfulSymlinks = results.filter((r) => !r.symlinkFailed).map((r) => r.agent);
+  const failedSymlinks = results.filter((r) => r.symlinkFailed).map((r) => r.agent);
+
+  if (successfulSymlinks.length > 0) {
+    lines.push(`  ${pc.dim('symlinked:')} ${formatList(successfulSymlinks)}`);
+  }
+  if (failedSymlinks.length > 0) {
+    lines.push(`  ${pc.yellow('copied:')} ${formatList(failedSymlinks)}`);
+  }
+
+  return lines;
+}
+
 /**
  * Wrapper around p.multiselect that adds a hint for keyboard usage.
  * Accepts options with required labels (matching our usage pattern).
@@ -422,6 +460,16 @@ export interface AddOptions {
   copy?: boolean;
 }
 
+export interface AddCommandOptions {
+  global?: boolean;
+  agent?: string[];
+  yes?: boolean;
+  command?: string[];
+  list?: boolean;
+  all?: boolean;
+  fullDepth?: boolean;
+}
+
 /**
  * Handle remote skill installation from any supported host provider.
  * This is the generic handler for direct URL skills (Mintlify, HuggingFace, etc.)
@@ -478,7 +526,7 @@ async function handleRemoteSkill(
     p.log.message(`  ${pc.cyan('Provider:')} ${provider.displayName}`);
     p.log.message(`  ${pc.cyan('Description:')} ${remoteSkill.description}`);
     console.log();
-    p.outro('Run without --list to install');
+    p.outro('Use add-c <name> to install specific commands');
     process.exit(0);
   }
 
@@ -834,7 +882,7 @@ async function handleWellKnownSkills(
       }
     }
     console.log();
-    p.outro('Run without --list to install');
+    p.outro('Use add-c <name> to install specific commands');
     process.exit(0);
   }
 
@@ -1293,7 +1341,7 @@ async function handleDirectUrlSkillLegacy(
     p.log.message(`  ${pc.cyan('Site:')} ${remoteSkill.installName}`);
     p.log.message(`  ${pc.cyan('Description:')} ${remoteSkill.description}`);
     console.log();
-    p.outro('Run without --list to install');
+    p.outro('Use add-c <name> to install specific commands');
     process.exit(0);
   }
 
@@ -2185,6 +2233,516 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
   }
 }
 
+const COMMAND_IDENTIFIER_REGEX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i;
+const COMMAND_FILE_SUFFIX = '.md';
+
+function normalizeCommandName(name: string): string {
+  return name.toLowerCase().endsWith(COMMAND_FILE_SUFFIX)
+    ? name.slice(0, -COMMAND_FILE_SUFFIX.length)
+    : name;
+}
+
+function isValidCommandIdentifier(name: string): boolean {
+  return COMMAND_IDENTIFIER_REGEX.test(name);
+}
+
+export async function runAddCommand(
+  args: string[],
+  options: AddCommandOptions = {}
+): Promise<void> {
+  let installTipShown = false;
+  let tempDir: string | null = null;
+  const supportedAgents = getSupportedCommandAgents();
+
+  const showInstallTip = (): void => {
+    if (installTipShown) return;
+    p.log.message(
+      pc.dim('Tip: use the --yes (-y) and --global (-g) flags to install without prompts.')
+    );
+    installTipShown = true;
+  };
+
+  if (args.length > 0) {
+    options.command = options.command || [];
+    options.command.push(...args);
+  }
+
+  if (options.all) {
+    options.command = ['*'];
+    options.agent = ['*'];
+    options.yes = true;
+  }
+
+  const hasCommand = !!(options.command && options.command.length > 0);
+  const hasOptions =
+    options.global !== undefined ||
+    options.agent !== undefined ||
+    options.yes !== undefined ||
+    options.list !== undefined ||
+    options.all !== undefined ||
+    options.fullDepth !== undefined;
+
+  if (!hasCommand && !hasOptions) {
+    console.log();
+    console.log(
+      pc.bgRed(pc.white(pc.bold(' ERROR '))) + ' ' + pc.red('Missing required argument: command')
+    );
+    console.log();
+    console.log(pc.dim('  Usage:'));
+    console.log(
+      `    ${pc.cyan('npx skills add-c')} ${pc.yellow('<command>')} ${pc.dim('[options]')}`
+    );
+    console.log(
+      `    ${pc.cyan('npx skills add-c')} ${pc.yellow('[options]')} ${pc.dim('(uses default registry)')}`
+    );
+    console.log();
+    console.log(pc.dim('  Example:'));
+    console.log(`    ${pc.cyan('npx skills add-c')} ${pc.yellow('my-command')}`);
+    console.log(`    ${pc.cyan('npx skills add-c')} ${pc.yellow('--list')}`);
+    console.log();
+    process.exit(1);
+  }
+
+  if (options.command) {
+    options.command = options.command.map((name) => normalizeCommandName(name));
+    const invalid = options.command.filter(
+      (name) => name !== '*' && !isValidCommandIdentifier(name)
+    );
+    if (invalid.length > 0) {
+      console.log();
+      console.log(
+        pc.bgRed(pc.white(pc.bold(' ERROR '))) +
+          ' ' +
+          pc.red(`Invalid command name(s): ${invalid.join(', ')}`)
+      );
+      console.log(pc.dim('  Command names must be simple identifiers (e.g., my-command).'));
+      console.log(pc.dim('  add-c only supports commands from the default registry.'));
+      console.log();
+      process.exit(1);
+    }
+  }
+
+  if (supportedAgents.length === 0) {
+    console.log();
+    p.outro(pc.red('No supported agents available for command installation.'));
+    process.exit(1);
+  }
+
+  if (options.agent && !options.agent.includes('*')) {
+    const invalidAgents = options.agent.filter((a) => !supportedAgents.includes(a as AgentType));
+    if (invalidAgents.length > 0) {
+      console.log();
+      p.log.error(`Unsupported agents for add-c: ${invalidAgents.join(', ')}`);
+      p.log.info(`Supported agents: ${supportedAgents.join(', ')}`);
+      console.log();
+      process.exit(1);
+    }
+  }
+
+  console.log();
+  p.intro(pc.bgCyan(pc.black(' commands ')));
+
+  if (!process.stdin.isTTY) {
+    showInstallTip();
+  }
+
+  try {
+    const spinner = p.spinner();
+    const parsed: ParsedSource = {
+      type: 'git',
+      url: DEFAULT_REGISTRY_URL,
+      subpath: DEFAULT_COMMANDS_SUBPATH,
+    };
+
+    spinner.start('Preparing registry...');
+    spinner.stop(`Source: ${parsed.url} (${parsed.subpath})`);
+
+    spinner.start('Cloning repository...');
+    tempDir = await cloneRepo(parsed.url, parsed.ref);
+    const commandsDir = tempDir;
+    spinner.stop('Repository cloned');
+
+    spinner.start('Discovering commands...');
+    const commands = await discoverCommands(commandsDir, parsed.subpath, {
+      fullDepth: options.fullDepth,
+    });
+
+    if (commands.length === 0) {
+      spinner.stop(pc.red('No commands found'));
+      p.outro(
+        pc.red(
+          'No valid commands found. Commands require a .md file in the registry commands/ directory.'
+        )
+      );
+      await cleanup(tempDir);
+      process.exit(1);
+    }
+
+    spinner.stop(`Found ${pc.green(commands.length)} command${commands.length > 1 ? 's' : ''}`);
+
+    if (options.list) {
+      console.log();
+      p.log.step(pc.bold('Available Commands'));
+      for (const command of commands) {
+        p.log.message(`  ${pc.cyan(getCommandDisplayName(command))}`);
+        if (command.description) {
+          p.log.message(`    ${pc.dim(command.description)}`);
+        }
+      }
+      console.log();
+      p.outro('Use add-c <name> to install specific commands');
+      await cleanup(tempDir);
+      process.exit(0);
+    }
+
+    let selectedCommands: Skill[];
+
+    if (options.command?.includes('*')) {
+      selectedCommands = commands;
+      p.log.info(`Installing all ${commands.length} commands`);
+    } else if (options.command && options.command.length > 0) {
+      selectedCommands = filterSkills(commands, options.command);
+
+      if (selectedCommands.length === 0) {
+        p.log.error(`No matching commands found for: ${options.command.join(', ')}`);
+        p.log.info('Available commands:');
+        for (const c of commands) {
+          p.log.message(`  - ${getCommandDisplayName(c)}`);
+        }
+        await cleanup(tempDir);
+        process.exit(1);
+      }
+
+      p.log.info(
+        `Selected ${selectedCommands.length} command${selectedCommands.length !== 1 ? 's' : ''}: ${selectedCommands.map((c) => pc.cyan(getCommandDisplayName(c))).join(', ')}`
+      );
+    } else if (commands.length === 1) {
+      selectedCommands = commands;
+      const firstCommand = commands[0]!;
+      p.log.info(`Command: ${pc.cyan(getCommandDisplayName(firstCommand))}`);
+      if (firstCommand.description) {
+        p.log.message(pc.dim(firstCommand.description));
+      }
+    } else if (options.yes) {
+      selectedCommands = commands;
+      p.log.info(`Installing all ${commands.length} commands`);
+    } else {
+      const commandChoices = commands.map((c) => ({
+        value: c,
+        label: getCommandDisplayName(c),
+        hint: c.description.length > 60 ? c.description.slice(0, 57) + '...' : c.description,
+      }));
+
+      const selected = await multiselect({
+        message: 'Select commands to install',
+        options: commandChoices,
+        required: true,
+      });
+
+      if (p.isCancel(selected)) {
+        p.cancel('Installation cancelled');
+        await cleanup(tempDir);
+        process.exit(0);
+      }
+
+      selectedCommands = selected as Skill[];
+    }
+
+    let targetAgents: AgentType[];
+
+    if (options.agent?.includes('*')) {
+      targetAgents = supportedAgents;
+      p.log.info(`Installing to all ${targetAgents.length} agents`);
+    } else if (options.agent && options.agent.length > 0) {
+      const invalidAgents = options.agent.filter((a) => !supportedAgents.includes(a as AgentType));
+      if (invalidAgents.length > 0) {
+        p.log.error(`Unsupported agents for add-c: ${invalidAgents.join(', ')}`);
+        p.log.info(`Supported agents: ${supportedAgents.join(', ')}`);
+        await cleanup(tempDir);
+        process.exit(1);
+      }
+      targetAgents = options.agent as AgentType[];
+    } else {
+      const installedAgents = (await detectInstalledAgents()).filter((a) =>
+        supportedAgents.includes(a)
+      );
+
+      if (installedAgents.length === 0) {
+        if (options.yes) {
+          targetAgents = supportedAgents;
+          p.log.info(`Installing to all ${targetAgents.length} agents`);
+        } else {
+          const agentChoices = supportedAgents.map((a) => ({
+            value: a,
+            label: agents[a].displayName,
+            hint: options.global ? agents[a].globalCommandsDir : agents[a].commandsDir,
+          }));
+          const selected = await promptForAgents(
+            'Which agents do you want to install to?',
+            agentChoices
+          );
+
+          if (isCancelled(selected)) {
+            p.cancel('Installation cancelled');
+            await cleanup(tempDir);
+            process.exit(0);
+          }
+
+          targetAgents = selected as AgentType[];
+        }
+      } else if (installedAgents.length === 1 || options.yes) {
+        targetAgents = installedAgents;
+        if (installedAgents.length === 1) {
+          const firstAgent = installedAgents[0]!;
+          p.log.info(`Installing to: ${pc.cyan(agents[firstAgent].displayName)}`);
+        } else {
+          p.log.info(
+            `Installing to: ${installedAgents.map((a) => pc.cyan(agents[a].displayName)).join(', ')}`
+          );
+        }
+      } else {
+        const agentChoices = supportedAgents.map((a) => ({
+          value: a,
+          label: agents[a].displayName,
+          hint: options.global ? agents[a].globalCommandsDir : agents[a].commandsDir,
+        }));
+
+        const selected = await promptForAgents(
+          'Which agents do you want to install to?',
+          agentChoices
+        );
+
+        if (isCancelled(selected)) {
+          p.cancel('Installation cancelled');
+          await cleanup(tempDir);
+          process.exit(0);
+        }
+
+        targetAgents = selected as AgentType[];
+      }
+    }
+
+    let installGlobally = options.global ?? false;
+    const supportsGlobal = targetAgents.some((a) => agents[a].globalCommandsDir !== undefined);
+
+    if (options.global && targetAgents.some((a) => agents[a].globalCommandsDir === undefined)) {
+      const unsupported = targetAgents.filter((a) => agents[a].globalCommandsDir === undefined);
+      p.log.error(
+        `Agents do not support global command installation: ${unsupported
+          .map((a) => agents[a].displayName)
+          .join(', ')}`
+      );
+      await cleanup(tempDir);
+      process.exit(1);
+    }
+
+    if (options.global === undefined && !options.yes && supportsGlobal) {
+      const scope = await p.select({
+        message: 'Installation scope',
+        options: [
+          {
+            value: false,
+            label: 'Project',
+            hint: 'Install in current directory',
+          },
+          {
+            value: true,
+            label: 'Global',
+            hint: 'Install in home directory',
+          },
+        ],
+      });
+
+      if (p.isCancel(scope)) {
+        p.cancel('Installation cancelled');
+        await cleanup(tempDir);
+        process.exit(0);
+      }
+
+      installGlobally = scope as boolean;
+    }
+
+    let installMode: InstallMode = 'symlink';
+    if (!options.yes) {
+      const modeChoice = await p.select({
+        message: 'Installation method',
+        options: [
+          {
+            value: 'symlink',
+            label: 'Symlink (Recommended)',
+            hint: 'Single source of truth, easy updates',
+          },
+          { value: 'copy', label: 'Copy to all agents', hint: 'Independent copies for each agent' },
+        ],
+      });
+
+      if (p.isCancel(modeChoice)) {
+        p.cancel('Installation cancelled');
+        await cleanup(tempDir);
+        process.exit(0);
+      }
+
+      installMode = modeChoice as InstallMode;
+    }
+
+    const cwd = process.cwd();
+    const summaryLines: string[] = [];
+    const overwriteChecks = await Promise.all(
+      selectedCommands.flatMap((command) =>
+        targetAgents.map(async (agent) => ({
+          commandName: command.name,
+          agent,
+          installed: await isCommandInstalled(command.name, agent, {
+            global: installGlobally,
+          }),
+        }))
+      )
+    );
+
+    const overwriteStatus = new Map<string, Map<string, boolean>>();
+    for (const { commandName, agent, installed } of overwriteChecks) {
+      if (!overwriteStatus.has(commandName)) {
+        overwriteStatus.set(commandName, new Map());
+      }
+      overwriteStatus.get(commandName)!.set(agent, installed);
+    }
+
+    for (const command of selectedCommands) {
+      if (summaryLines.length > 0) summaryLines.push('');
+
+      const canonicalPath = getCanonicalCommandPath(command.name, { global: installGlobally });
+      const shortCanonical = shortenPath(canonicalPath, cwd);
+      summaryLines.push(`${pc.cyan(shortCanonical)}`);
+      summaryLines.push(...buildCommandSummaryLines(targetAgents, installMode));
+
+      const commandOverwrites = overwriteStatus.get(command.name);
+      const overwriteAgents = targetAgents
+        .filter((a) => commandOverwrites?.get(a))
+        .map((a) => agents[a].displayName);
+
+      if (overwriteAgents.length > 0) {
+        summaryLines.push(`  ${pc.yellow('overwrites:')} ${formatList(overwriteAgents)}`);
+      }
+    }
+
+    console.log();
+    p.note(summaryLines.join('\n'), 'Installation Summary');
+
+    if (!options.yes) {
+      const confirmed = await p.confirm({ message: 'Proceed with installation?' });
+      if (p.isCancel(confirmed) || !confirmed) {
+        p.cancel('Installation cancelled');
+        await cleanup(tempDir);
+        process.exit(0);
+      }
+    }
+
+    spinner.start('Installing commands...');
+
+    const results: {
+      command: string;
+      agent: string;
+      success: boolean;
+      path: string;
+      canonicalPath?: string;
+      mode: InstallMode;
+      symlinkFailed?: boolean;
+      error?: string;
+    }[] = [];
+
+    for (const command of selectedCommands) {
+      for (const agent of targetAgents) {
+        const result = await installCommandForAgent(command, agent, {
+          global: installGlobally,
+          mode: installMode,
+        });
+        results.push({
+          command: getSkillDisplayName(command),
+          agent: agents[agent].displayName,
+          ...result,
+        });
+      }
+    }
+
+    spinner.stop('Installation complete');
+
+    console.log();
+    const successful = results.filter((r) => r.success);
+    const failed = results.filter((r) => !r.success);
+
+    if (successful.length > 0) {
+      const byCommand = new Map<string, typeof results>();
+      for (const r of successful) {
+        const commandResults = byCommand.get(r.command) || [];
+        commandResults.push(r);
+        byCommand.set(r.command, commandResults);
+      }
+
+      const commandCount = byCommand.size;
+      const symlinkFailures = successful.filter((r) => r.mode === 'symlink' && r.symlinkFailed);
+      const copiedAgents = symlinkFailures.map((r) => r.agent);
+      const resultLines: string[] = [];
+
+      for (const [commandName, commandResults] of byCommand) {
+        const firstResult = commandResults[0]!;
+
+        if (firstResult.mode === 'copy') {
+          resultLines.push(`${pc.green('✓')} ${commandName} ${pc.dim('(copied)')}`);
+          for (const r of commandResults) {
+            const shortPath = shortenPath(r.path, cwd);
+            resultLines.push(`  ${pc.dim('→')} ${shortPath}`);
+          }
+        } else {
+          if (firstResult.canonicalPath) {
+            const shortPath = shortenPath(firstResult.canonicalPath, cwd);
+            resultLines.push(`${pc.green('✓')} ${shortPath}`);
+          } else {
+            resultLines.push(`${pc.green('✓')} ${commandName}`);
+          }
+          resultLines.push(...buildCommandResultLines(commandResults));
+        }
+      }
+
+      const title = pc.green(`Installed ${commandCount} command${commandCount !== 1 ? 's' : ''}`);
+      p.note(resultLines.join('\n'), title);
+
+      if (symlinkFailures.length > 0) {
+        p.log.warn(pc.yellow(`Symlinks failed for: ${formatList(copiedAgents)}`));
+        p.log.message(
+          pc.dim(
+            '  Files were copied instead. On Windows, enable Developer Mode for symlink support.'
+          )
+        );
+      }
+    }
+
+    if (failed.length > 0) {
+      console.log();
+      p.log.error(pc.red(`Failed to install ${failed.length}`));
+      for (const r of failed) {
+        p.log.message(`  ${pc.red('✗')} ${r.command} → ${r.agent}: ${pc.dim(r.error)}`);
+      }
+    }
+
+    console.log();
+    p.outro(pc.green('Done!'));
+  } catch (error) {
+    if (error instanceof GitCloneError) {
+      p.log.error(pc.red('Failed to clone repository'));
+      for (const line of error.message.split('\n')) {
+        p.log.message(pc.dim(line));
+      }
+    } else {
+      p.log.error(error instanceof Error ? error.message : 'Unknown error occurred');
+    }
+    showInstallTip();
+    p.outro(pc.red('Installation failed'));
+    process.exit(1);
+  } finally {
+    await cleanup(tempDir);
+  }
+}
+
 async function cleanup(tempDir: string | null) {
   if (tempDir) {
     try {
@@ -2323,4 +2881,53 @@ export function parseAddOptions(args: string[]): { source: string[]; options: Ad
   }
 
   return { source, options };
+}
+
+// Parse command line options for add-c
+export function parseAddCommandOptions(args: string[]): {
+  commands: string[];
+  options: AddCommandOptions;
+} {
+  const options: AddCommandOptions = {};
+  const commands: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+
+    if (arg === '-g' || arg === '--global') {
+      options.global = true;
+    } else if (arg === '-y' || arg === '--yes') {
+      options.yes = true;
+    } else if (arg === '-l' || arg === '--list') {
+      options.list = true;
+    } else if (arg === '--all') {
+      options.all = true;
+    } else if (arg === '-a' || arg === '--agent') {
+      options.agent = options.agent || [];
+      i++;
+      let nextArg = args[i];
+      while (i < args.length && nextArg && !nextArg.startsWith('-')) {
+        options.agent.push(nextArg);
+        i++;
+        nextArg = args[i];
+      }
+      i--;
+    } else if (arg === '-c' || arg === '--command') {
+      options.command = options.command || [];
+      i++;
+      let nextArg = args[i];
+      while (i < args.length && nextArg && !nextArg.startsWith('-')) {
+        options.command.push(nextArg);
+        i++;
+        nextArg = args[i];
+      }
+      i--;
+    } else if (arg === '--full-depth') {
+      options.fullDepth = true;
+    } else if (arg && !arg.startsWith('-')) {
+      commands.push(arg);
+    }
+  }
+
+  return { commands, options };
 }

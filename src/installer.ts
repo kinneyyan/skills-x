@@ -16,7 +16,7 @@ import { homedir, platform } from 'os';
 import type { Skill, AgentType, MintlifySkill, RemoteSkill } from './types.ts';
 import type { WellKnownSkill } from './providers/wellknown.ts';
 import { agents, detectInstalledAgents, isUniversalAgent } from './agents.ts';
-import { AGENTS_DIR, SKILLS_SUBDIR } from './constants.ts';
+import { AGENTS_DIR, COMMANDS_SUBDIR, SKILLS_SUBDIR } from './constants.ts';
 import { parseSkillMd } from './skills.ts';
 
 export type InstallMode = 'symlink' | 'copy';
@@ -95,6 +95,16 @@ export function getAgentBaseDir(agentType: AgentType, global: boolean, cwd?: str
   return join(baseDir, agent.skillsDir);
 }
 
+/**
+ * Gets the canonical .agents/commands directory path
+ * @param global - Whether to use global (home) or project-level location
+ * @param cwd - Current working directory for project-level installs
+ */
+export function getCanonicalCommandsDir(global: boolean, cwd?: string): string {
+  const baseDir = global ? homedir() : cwd || process.cwd();
+  return join(baseDir, AGENTS_DIR, COMMANDS_SUBDIR);
+}
+
 function resolveSymlinkTarget(linkPath: string, linkTarget: string): string {
   return resolve(dirname(linkPath), linkTarget);
 }
@@ -114,6 +124,23 @@ async function cleanAndCreateDirectory(path: string): Promise<void> {
     // Ignore cleanup errors - mkdir will fail if there's a real problem
   }
   await mkdir(path, { recursive: true });
+}
+
+async function cleanAndCreateFilePath(path: string): Promise<void> {
+  try {
+    await rm(path, { force: true });
+  } catch {
+    // Ignore cleanup errors - mkdir will fail if there's a real problem
+  }
+  await mkdir(dirname(path), { recursive: true });
+}
+
+async function copyCommandFile(src: string, dest: string): Promise<void> {
+  await mkdir(dirname(dest), { recursive: true });
+  await cp(src, dest, {
+    dereference: true,
+    recursive: false,
+  });
 }
 
 /**
@@ -321,7 +348,140 @@ export async function installSkillForAgent(
   }
 }
 
-const EXCLUDE_FILES = new Set(['metadata.json']);
+export async function installCommandForAgent(
+  command: Skill,
+  agentType: AgentType,
+  options: { global?: boolean; cwd?: string; mode?: InstallMode } = {}
+): Promise<InstallResult> {
+  const agent = agents[agentType];
+  const isGlobal = options.global ?? false;
+  const cwd = options.cwd || process.cwd();
+
+  if (!agent.commandsDir) {
+    return {
+      success: false,
+      path: '',
+      mode: options.mode ?? 'symlink',
+      error: `${agent.displayName} does not support command installation`,
+    };
+  }
+
+  if (isGlobal && agent.globalCommandsDir === undefined) {
+    return {
+      success: false,
+      path: '',
+      mode: options.mode ?? 'symlink',
+      error: `${agent.displayName} does not support global command installation`,
+    };
+  }
+
+  const rawCommandName = command.name || basename(command.path, '.md');
+  const normalizedName = rawCommandName.toLowerCase().endsWith('.md')
+    ? rawCommandName.slice(0, -3)
+    : rawCommandName;
+  const commandName = sanitizeName(normalizedName);
+
+  let sourceIsDir = false;
+  try {
+    const sourceStats = await stat(command.path);
+    sourceIsDir = sourceStats.isDirectory();
+  } catch {
+    return {
+      success: false,
+      path: '',
+      mode: options.mode ?? 'symlink',
+      error: 'Command source not found',
+    };
+  }
+
+  const canonicalBase = getCanonicalCommandsDir(isGlobal, cwd);
+  const canonicalTarget = join(canonicalBase, sourceIsDir ? commandName : `${commandName}.md`);
+
+  const agentBase = isGlobal ? agent.globalCommandsDir! : join(cwd, agent.commandsDir);
+  const agentTarget = join(agentBase, sourceIsDir ? commandName : `${commandName}.md`);
+
+  const installMode = options.mode ?? 'symlink';
+
+  if (!isPathSafe(canonicalBase, canonicalTarget)) {
+    return {
+      success: false,
+      path: agentTarget,
+      mode: installMode,
+      error: 'Invalid command name: potential path traversal detected',
+    };
+  }
+
+  if (!isPathSafe(agentBase, agentTarget)) {
+    return {
+      success: false,
+      path: agentTarget,
+      mode: installMode,
+      error: 'Invalid command name: potential path traversal detected',
+    };
+  }
+
+  try {
+    if (installMode === 'copy') {
+      if (sourceIsDir) {
+        await cleanAndCreateDirectory(agentTarget);
+        await copyDirectory(command.path, agentTarget);
+      } else {
+        await cleanAndCreateFilePath(agentTarget);
+        await copyCommandFile(command.path, agentTarget);
+      }
+
+      return {
+        success: true,
+        path: agentTarget,
+        mode: 'copy',
+      };
+    }
+
+    if (sourceIsDir) {
+      await cleanAndCreateDirectory(canonicalTarget);
+      await copyDirectory(command.path, canonicalTarget);
+    } else {
+      await cleanAndCreateFilePath(canonicalTarget);
+      await copyCommandFile(command.path, canonicalTarget);
+    }
+
+    const symlinkCreated = await createSymlink(canonicalTarget, agentTarget);
+
+    if (!symlinkCreated) {
+      if (sourceIsDir) {
+        await cleanAndCreateDirectory(agentTarget);
+        await copyDirectory(command.path, agentTarget);
+      } else {
+        await cleanAndCreateFilePath(agentTarget);
+        await copyCommandFile(command.path, agentTarget);
+      }
+
+      return {
+        success: true,
+        path: agentTarget,
+        canonicalPath: canonicalTarget,
+        mode: 'symlink',
+        symlinkFailed: true,
+      };
+    }
+
+    return {
+      success: true,
+      path: agentTarget,
+      canonicalPath: canonicalTarget,
+      mode: 'symlink',
+    };
+  } catch (error) {
+    return {
+      success: false,
+      path: agentTarget,
+      mode: installMode,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+const EXCLUDE_FILES = new Set(['README.md', 'metadata.json']);
 const EXCLUDE_DIRS = new Set(['.git']);
 
 const isExcluded = (name: string, isDirectory: boolean = false): boolean => {
@@ -391,6 +551,41 @@ export async function isSkillInstalled(
   }
 }
 
+export async function isCommandInstalled(
+  commandName: string,
+  agentType: AgentType,
+  options: { global?: boolean; cwd?: string } = {}
+): Promise<boolean> {
+  const agent = agents[agentType];
+  const sanitized = sanitizeName(commandName);
+  const filename = `${sanitized}.md`;
+
+  if (!agent.commandsDir) {
+    return false;
+  }
+
+  if (options.global && agent.globalCommandsDir === undefined) {
+    return false;
+  }
+
+  const targetBase = options.global
+    ? agent.globalCommandsDir!
+    : join(options.cwd || process.cwd(), agent.commandsDir);
+
+  const commandDir = join(targetBase, filename);
+
+  if (!isPathSafe(targetBase, commandDir)) {
+    return false;
+  }
+
+  try {
+    await access(commandDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function getInstallPath(
   skillName: string,
   agentType: AgentType,
@@ -410,6 +605,34 @@ export function getInstallPath(
   return installPath;
 }
 
+export function getCommandInstallPath(
+  commandName: string,
+  agentType: AgentType,
+  options: { global?: boolean; cwd?: string } = {}
+): string {
+  const agent = agents[agentType];
+  const cwd = options.cwd || process.cwd();
+  const sanitized = sanitizeName(commandName);
+  const filename = `${sanitized}.md`;
+
+  if (!agent.commandsDir) {
+    throw new Error('Agent does not support command installation');
+  }
+
+  const targetBase =
+    options.global && agent.globalCommandsDir !== undefined
+      ? agent.globalCommandsDir
+      : join(cwd, agent.commandsDir);
+
+  const installPath = join(targetBase, filename);
+
+  if (!isPathSafe(targetBase, installPath)) {
+    throw new Error('Invalid command name: potential path traversal detected');
+  }
+
+  return installPath;
+}
+
 /**
  * Gets the canonical .agents/skills/<skill> path
  */
@@ -423,6 +646,22 @@ export function getCanonicalPath(
 
   if (!isPathSafe(canonicalBase, canonicalPath)) {
     throw new Error('Invalid skill name: potential path traversal detected');
+  }
+
+  return canonicalPath;
+}
+
+export function getCanonicalCommandPath(
+  commandName: string,
+  options: { global?: boolean; cwd?: string } = {}
+): string {
+  const sanitized = sanitizeName(commandName);
+  const filename = `${sanitized}.md`;
+  const canonicalBase = getCanonicalCommandsDir(options.global ?? false, options.cwd);
+  const canonicalPath = join(canonicalBase, filename);
+
+  if (!isPathSafe(canonicalBase, canonicalPath)) {
+    throw new Error('Invalid command name: potential path traversal detected');
   }
 
   return canonicalPath;

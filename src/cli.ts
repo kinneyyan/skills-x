@@ -6,7 +6,13 @@ import { basename, join, dirname } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
-import { runAdd, parseAddOptions, initTelemetry } from './add.ts';
+import {
+  runAdd,
+  parseAddOptions,
+  runAddCommand,
+  parseAddCommandOptions,
+  initTelemetry,
+} from './add.ts';
 import { runFind } from './find.ts';
 import { runInstallFromLock } from './install.ts';
 import { runList } from './list.ts';
@@ -37,10 +43,10 @@ const DIM = '\x1b[38;5;102m'; // darker gray for secondary text
 const TEXT = '\x1b[38;5;145m'; // lighter gray for primary text
 
 const LOGO_LINES = [
-  ' ▗▄▄▖▗▖ ▗▖▗▄▄▄▖▗▖   ▗▖    ▗▄▄▖▗▖  ▗▖',
-  '▐▌   ▐▌▗▞▘  █  ▐▌   ▐▌   ▐▌    ▝▚▞▘ ',
-  ' ▝▀▚▖▐▛▚▖   █  ▐▌   ▐▌    ▝▀▚▖  ▐▌  ',
-  '▗▄▄▞▘▐▌ ▐▌▗▄█▄▖▐▙▄▄▖▐▙▄▄▖▗▄▄▞▘▗▞▘▝▚▖',
+  ' ▗▄▄▖▗▖ ▗▖▗▄▄▄▖▗▖   ▗▖    ▗▄▄▖   ▗▖  ▗▖',
+  '▐▌   ▐▌▗▞▘  █  ▐▌   ▐▌   ▐▌       ▝▚▞▘ ',
+  ' ▝▀▚▖▐▛▚▖   █  ▐▌   ▐▌    ▝▀▚▖ ▀▀▀ ▐▌  ',
+  '▗▄▄▞▘▐▌ ▐▌▗▄█▄▖▐▙▄▄▖▐▙▄▄▖▗▄▄▞▘   ▗▞▘▝▚▖',
 ];
 
 // 256-color middle grays - visible on both light and dark backgrounds
@@ -67,6 +73,9 @@ function showBanner(): void {
   console.log();
   console.log(
     `  ${DIM}$${RESET} ${TEXT}npx skills add ${DIM}<package>${RESET}        ${DIM}Add a new skill${RESET}`
+  );
+  console.log(
+    `  ${DIM}$${RESET} ${TEXT}npx skills add-c ${DIM}<command>${RESET} ${DIM}Install a command${RESET}`
   );
   console.log(
     `  ${DIM}$${RESET} ${TEXT}npx skills remove${RESET}               ${DIM}Remove installed skills${RESET}`
@@ -109,6 +118,7 @@ ${BOLD}Manage Skills:${RESET}
   add <package>        Add a skill package (alias: a)
                        e.g. vercel-labs/agent-skills
                             https://github.com/vercel-labs/agent-skills
+  add-c <command>      Add a command package (default registry only)
   remove [skills]      Remove installed skills
   list, ls             List installed skills
   find [query]         Search for skills interactively
@@ -131,6 +141,14 @@ ${BOLD}Add Options:${RESET}
   --copy                 Copy files instead of symlinking to agent directories
   --all                  Shorthand for --skill '*' --agent '*' -y
   --full-depth           Search all subdirectories even when a root SKILL.md exists
+
+${BOLD}Add-C Options:${RESET}
+  -g, --global           Install command globally (user-level) instead of project-level
+  -a, --agent <agents>   Specify agents to install to (use '*' for all supported agents)
+  -c, --command <names>  Specify command names to install (use '*' for all commands)
+  -l, --list             List available commands in the registry without installing
+  -y, --yes              Skip confirmation prompts
+  --all                  Shorthand for --command '*' --agent '*' -y
 
 ${BOLD}Remove Options:${RESET}
   -g, --global           Remove from global scope
@@ -156,8 +174,10 @@ ${BOLD}Examples:${RESET}
   ${DIM}$${RESET} skills add vercel-labs/agent-skills -g
   ${DIM}$${RESET} skills add vercel-labs/agent-skills --agent claude-code cursor
   ${DIM}$${RESET} skills add vercel-labs/agent-skills --skill pr-review commit
-  ${DIM}$${RESET} skills remove                        ${DIM}# interactive remove${RESET}
-  ${DIM}$${RESET} skills remove web-design             ${DIM}# remove by name${RESET}
+  ${DIM}$${RESET} skills add-c my-command
+  ${DIM}$${RESET} skills add-c --list
+  ${DIM}$${RESET} skills remove                   ${DIM}# interactive remove${RESET}
+  ${DIM}$${RESET} skills remove web-design        ${DIM}# remove by name${RESET}
   ${DIM}$${RESET} skills rm --global frontend-design
   ${DIM}$${RESET} skills list                          ${DIM}# list project skills${RESET}
   ${DIM}$${RESET} skills ls -g                         ${DIM}# list global skills${RESET}
@@ -609,6 +629,12 @@ async function main(): Promise<void> {
       showLogo();
       const { source: addSource, options: addOpts } = parseAddOptions(restArgs);
       await runAdd(addSource, addOpts);
+      break;
+    }
+    case 'add-c': {
+      showLogo();
+      const { commands, options } = parseAddCommandOptions(restArgs);
+      await runAddCommand(commands, options);
       break;
     }
     case 'remove':

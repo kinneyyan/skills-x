@@ -56,6 +56,10 @@ export interface AgentConfig {
   skillsDir: string;
   /** Global skills directory. Set to undefined if the agent doesn't support global installation. */
   globalSkillsDir: string | undefined;
+  /** Project-level commands directory. Set to undefined if the agent doesn't support command installation. */
+  commandsDir?: string;
+  /** Global commands directory. Set to undefined if the agent doesn't support global command installation. */
+  globalCommandsDir?: string;
   detectInstalled: () => Promise<boolean>;
   /** Whether to show this agent in the universal agents list. Defaults to true. */
   showInUniversalList?: boolean;

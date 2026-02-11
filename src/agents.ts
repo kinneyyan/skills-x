@@ -1,4 +1,4 @@
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { xdgConfig } from 'xdg-basedir';
@@ -9,6 +9,10 @@ const home = homedir();
 const configHome = xdgConfig ?? join(home, '.config');
 const codexHome = process.env.CODEX_HOME?.trim() || join(home, '.codex');
 const claudeHome = process.env.CLAUDE_CONFIG_DIR?.trim() || join(home, '.claude');
+const clineGlobalWorkflowsDir =
+  platform() === 'win32'
+    ? join(home, 'Documents', 'Cline', 'Workflows')
+    : join(home, 'Documents', 'Cline', 'Workflows');
 
 export function getOpenClawGlobalSkillsDir(
   homeDir = home,
@@ -59,6 +63,8 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Claude Code',
     skillsDir: '.claude/skills',
     globalSkillsDir: join(claudeHome, 'skills'),
+    commandsDir: '.claude/commands',
+    globalCommandsDir: join(claudeHome, 'commands'),
     detectInstalled: async () => {
       return existsSync(claudeHome);
     },
@@ -81,6 +87,8 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Cline',
     skillsDir: '.cline/skills',
     globalSkillsDir: join(home, '.cline/skills'),
+    commandsDir: '.clinerules/workflows',
+    globalCommandsDir: clineGlobalWorkflowsDir,
     detectInstalled: async () => {
       return existsSync(join(home, '.cline'));
     },
@@ -207,6 +215,8 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'Kilo Code',
     skillsDir: '.kilocode/skills',
     globalSkillsDir: join(home, '.kilocode/skills'),
+    commandsDir: '.kilocode/workflows',
+    globalCommandsDir: join(home, '.kilocode', 'workflows'),
     detectInstalled: async () => {
       return existsSync(join(home, '.kilocode'));
     },
@@ -270,6 +280,8 @@ export const agents: Record<AgentType, AgentConfig> = {
     displayName: 'OpenCode',
     skillsDir: '.agents/skills',
     globalSkillsDir: join(configHome, 'opencode/skills'),
+    commandsDir: '.opencode/commands',
+    globalCommandsDir: join(home, '.opencode', 'commands'),
     detectInstalled: async () => {
       return existsSync(join(configHome, 'opencode'));
     },
