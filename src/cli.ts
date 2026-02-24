@@ -84,7 +84,7 @@ function showBanner(): void {
     `  ${DIM}$${RESET} ${TEXT}npx skills list${RESET}                 ${DIM}List installed skills${RESET}`
   );
   console.log(
-    `  ${DIM}$${RESET} ${TEXT}npx skills find ${DIM}[query]${RESET}         ${DIM}Search for skills${RESET}`
+    `  ${DIM}$${RESET} ${TEXT}npx skills find ${DIM}[query] [-g]${RESET}    ${DIM}Search skills (default registry or global)${RESET}`
   );
   console.log();
   console.log(
@@ -121,7 +121,7 @@ ${BOLD}Manage Skills:${RESET}
   add-c <command>      Add a command package (default registry only)
   remove [skills]      Remove installed skills
   list, ls             List installed skills
-  find [query]         Search for skills interactively
+  find [query] [-g]    Search for skills (default registry by default)
 
 ${BOLD}Updates:${RESET}
   check                Check for available skill updates
@@ -165,6 +165,9 @@ ${BOLD}List Options:${RESET}
   -g, --global           List global skills (default: project)
   -a, --agent <agents>   Filter by specific agents
 
+${BOLD}Find Options:${RESET}
+  -g, --global           Search globally on https://skills.sh (default: default registry)
+
 ${BOLD}Options:${RESET}
   --help, -h        Show this help message
   --version, -v     Show version number
@@ -182,8 +185,9 @@ ${BOLD}Examples:${RESET}
   ${DIM}$${RESET} skills list                          ${DIM}# list project skills${RESET}
   ${DIM}$${RESET} skills ls -g                         ${DIM}# list global skills${RESET}
   ${DIM}$${RESET} skills ls -a claude-code             ${DIM}# filter by agent${RESET}
-  ${DIM}$${RESET} skills find                          ${DIM}# interactive search${RESET}
-  ${DIM}$${RESET} skills find typescript               ${DIM}# search by keyword${RESET}
+  ${DIM}$${RESET} skills find                          ${DIM}# interactive default-registry search${RESET}
+  ${DIM}$${RESET} skills find typescript               ${DIM}# search default registry by keyword${RESET}
+  ${DIM}$${RESET} skills find -g typescript            ${DIM}# search globally on skills.sh${RESET}
   ${DIM}$${RESET} skills check
   ${DIM}$${RESET} skills update
   ${DIM}$${RESET} skills experimental_install            ${DIM}# restore from skills-lock.json${RESET}

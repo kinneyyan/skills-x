@@ -33,7 +33,9 @@ export interface SearchSkill {
   installs: number;
 }
 
-interface DefaultRegistrySkillResult {
+export type FindMode = 'default' | 'global';
+
+export interface DefaultRegistrySkillResult {
   kind: 'default';
   name: string;
   registryUrl: string;
@@ -44,6 +46,16 @@ interface ApiSkillResult extends SearchSkill {
 }
 
 type FindResult = DefaultRegistrySkillResult | ApiSkillResult;
+
+export interface ParsedFindArgs {
+  mode: FindMode;
+  query: string;
+}
+
+interface SearchProviders {
+  searchDefaultRegistry: (query: string) => Promise<DefaultRegistrySkillResult[]>;
+  searchSkillsAPI: (query: string) => Promise<SearchSkill[]>;
+}
 
 // Search via API
 export async function searchSkillsAPI(query: string): Promise<SearchSkill[]> {
@@ -128,28 +140,65 @@ async function searchDefaultRegistry(query: string): Promise<DefaultRegistrySkil
   }
 }
 
+export function parseFindArgs(args: string[]): ParsedFindArgs {
+  let mode: FindMode = 'default';
+  const queryParts: string[] = [];
+  let parsingOptions = true;
+
+  for (const arg of args) {
+    if (parsingOptions && arg === '--') {
+      parsingOptions = false;
+      continue;
+    }
+
+    if (parsingOptions && (arg === '-g' || arg === '--global')) {
+      mode = 'global';
+      continue;
+    }
+
+    queryParts.push(arg);
+  }
+
+  return {
+    mode,
+    query: queryParts.join(' ').trim(),
+  };
+}
+
+export async function searchSkillsByMode(
+  query: string,
+  mode: FindMode,
+  providers: SearchProviders = { searchDefaultRegistry, searchSkillsAPI }
+): Promise<{ defaultResults: DefaultRegistrySkillResult[]; apiResults: SearchSkill[] }> {
+  if (mode === 'global') {
+    const apiResults = await providers.searchSkillsAPI(query);
+    return { defaultResults: [], apiResults };
+  }
+
+  const defaultResults = await providers.searchDefaultRegistry(query);
+  return { defaultResults, apiResults: [] };
+}
+
 export function formatNonInteractiveResults(
+  mode: FindMode,
   defaultResults: DefaultRegistrySkillResult[],
   apiResults: SearchSkill[]
 ): string[] {
   const lines: string[] = [];
-  const hasDefault = defaultResults.length > 0;
-  const hasApi = apiResults.length > 0;
+  const hasDefault = mode === 'default' && defaultResults.length > 0;
+  const hasApi = mode === 'global' && apiResults.length > 0;
 
   if (hasDefault) {
-    lines.push(`${DIM}Install with${RESET} npx skills add <name>${DIM} (Default registry)${RESET}`);
+    lines.push(
+      `${DIM}Install with${RESET} npx skills add <name>${DIM} (From default registry)${RESET}`
+    );
     lines.push('');
 
     for (const skill of defaultResults) {
-      lines.push(`${BOLD}${skill.name}${RESET}`);
+      lines.push(`${TEXT}${skill.name}${RESET}`);
       lines.push(`${DIM}└ ${skill.registryUrl}${RESET}`);
       lines.push('');
     }
-  }
-
-  if (hasDefault && hasApi) {
-    lines.push(`${DIM}------------------------------${RESET}`);
-    lines.push('');
   }
 
   if (hasApi) {
@@ -179,7 +228,7 @@ const MOVE_UP = (n: number) => `\x1b[${n}A`;
 const MOVE_TO_COL = (n: number) => `\x1b[${n}G`;
 
 // Custom fzf-style search prompt using raw readline
-async function runSearchPrompt(initialQuery = ''): Promise<FindResult | null> {
+async function runSearchPrompt(mode: FindMode, initialQuery = ''): Promise<FindResult | null> {
   let results: FindResult[] = [];
   let defaultResults: DefaultRegistrySkillResult[] = [];
   let apiResults: ApiSkillResult[] = [];
@@ -231,47 +280,32 @@ async function runSearchPrompt(initialQuery = ''): Promise<FindResult | null> {
       const maxVisible = 8;
       const visible = combinedResults.slice(0, maxVisible);
 
-      let defaultCount = Math.min(defaultResults.length, maxVisible);
-      let visibleIndex = 0;
-
-      if (defaultResults.length > 0) {
+      if (mode === 'default') {
         lines.push(`${DIM}Default registry:${RESET}`);
-      }
-
-      for (let i = 0; i < defaultCount; i++) {
-        const skill = visible[visibleIndex] as DefaultRegistrySkillResult | undefined;
-        if (!skill) break;
-        const isSelected = visibleIndex === selectedIndex;
-        const arrow = isSelected ? `${BOLD}>${RESET}` : ' ';
-        const name = isSelected ? `${BOLD}${skill.name}${RESET}` : `${TEXT}${skill.name}${RESET}`;
-        const source = ` ${DIM}${DEFAULT_REGISTRY_SOURCE_LABEL}${RESET}`;
-        const loadingIndicator = loading && visibleIndex === 0 ? ` ${DIM}...${RESET}` : '';
-
-        lines.push(`  ${arrow} ${name}${source}${loadingIndicator}`);
-        visibleIndex++;
-      }
-
-      if (defaultResults.length > 0 && apiResults.length > 0) {
-        lines.push(`${DIM}------------------------------${RESET}`);
-      }
-
-      if (apiResults.length > 0 && visibleIndex < visible.length) {
-        lines.push(`${DIM}API results:${RESET}`);
-      }
-
-      while (visibleIndex < visible.length) {
-        const skill = visible[visibleIndex] as ApiSkillResult | undefined;
-        if (!skill) break;
-        const isSelected = visibleIndex === selectedIndex;
-        const arrow = isSelected ? `${BOLD}>${RESET}` : ' ';
-        const name = isSelected ? `${BOLD}${skill.name}${RESET}` : `${TEXT}${skill.name}${RESET}`;
-        const source = skill.source ? ` ${DIM}${skill.source}${RESET}` : '';
-        const installs = formatInstalls(skill.installs);
-        const installsBadge = installs ? ` ${CYAN}${installs}${RESET}` : '';
-        const loadingIndicator = loading && visibleIndex === 0 ? ` ${DIM}...${RESET}` : '';
-
-        lines.push(`  ${arrow} ${name}${source}${installsBadge}${loadingIndicator}`);
-        visibleIndex++;
+        for (let i = 0; i < visible.length; i++) {
+          const skill = visible[i] as DefaultRegistrySkillResult | undefined;
+          if (!skill) break;
+          const isSelected = i === selectedIndex;
+          const arrow = isSelected ? `${BOLD}>${RESET}` : ' ';
+          const name = isSelected ? `${BOLD}${skill.name}${RESET}` : `${TEXT}${skill.name}${RESET}`;
+          const source = ` ${DIM}${DEFAULT_REGISTRY_SOURCE_LABEL}${RESET}`;
+          const loadingIndicator = loading && i === 0 ? ` ${DIM}...${RESET}` : '';
+          lines.push(`  ${arrow} ${name}${source}${loadingIndicator}`);
+        }
+      } else {
+        lines.push(`${DIM}Global results (https://skills.sh):${RESET}`);
+        for (let i = 0; i < visible.length; i++) {
+          const skill = visible[i] as ApiSkillResult | undefined;
+          if (!skill) break;
+          const isSelected = i === selectedIndex;
+          const arrow = isSelected ? `${BOLD}>${RESET}` : ' ';
+          const name = isSelected ? `${BOLD}${skill.name}${RESET}` : `${TEXT}${skill.name}${RESET}`;
+          const source = skill.source ? ` ${DIM}${skill.source}${RESET}` : '';
+          const installs = formatInstalls(skill.installs);
+          const installsBadge = installs ? ` ${CYAN}${installs}${RESET}` : '';
+          const loadingIndicator = loading && i === 0 ? ` ${DIM}...${RESET}` : '';
+          lines.push(`  ${arrow} ${name}${source}${installsBadge}${loadingIndicator}`);
+        }
       }
     }
 
@@ -315,13 +349,16 @@ async function runSearchPrompt(initialQuery = ''): Promise<FindResult | null> {
 
     debounceTimer = setTimeout(async () => {
       try {
-        defaultResults = await searchDefaultRegistry(q);
-        results = [...defaultResults];
-        render();
-
-        const apiResponse = await searchSkillsAPI(q);
-        apiResults = apiResponse.map((skill) => ({ ...skill, kind: 'api' }));
-        results = [...defaultResults, ...apiResults];
+        if (mode === 'default') {
+          defaultResults = await searchDefaultRegistry(q);
+          apiResults = [];
+          results = [...defaultResults];
+        } else {
+          defaultResults = [];
+          const apiResponse = await searchSkillsAPI(q);
+          apiResults = apiResponse.map((skill) => ({ ...skill, kind: 'api' }));
+          results = [...apiResults];
+        }
         selectedIndex = 0;
       } catch {
         results = [];
@@ -423,16 +460,16 @@ async function isRepoPublic(owner: string, repo: string): Promise<boolean> {
 }
 
 export async function runFind(args: string[]): Promise<void> {
-  const query = args.join(' ');
+  const { mode, query } = parseFindArgs(args);
   const isNonInteractive = !process.stdin.isTTY;
   const agentTip = `${DIM}Tip: if running in a coding agent, follow these steps:${RESET}
 ${DIM}  1) npx skills find [query]${RESET}
-${DIM}  2) npx skills add <owner/repo@skill>${RESET}`;
+${DIM}  2) npx skills find -g [query]${RESET}
+${DIM}  3) npx skills add <owner/repo@skill>${RESET}`;
 
   // Non-interactive mode: just print results and exit
   if (query) {
-    const defaultResults = await searchDefaultRegistry(query);
-    const apiResults = await searchSkillsAPI(query);
+    const { defaultResults, apiResults } = await searchSkillsByMode(query, mode);
     const totalResults = defaultResults.length + apiResults.length;
 
     // Track telemetry for non-interactive search
@@ -447,7 +484,7 @@ ${DIM}  2) npx skills add <owner/repo@skill>${RESET}`;
       return;
     }
 
-    const lines = formatNonInteractiveResults(defaultResults, apiResults);
+    const lines = formatNonInteractiveResults(mode, defaultResults, apiResults);
     for (const line of lines) {
       console.log(line);
     }
@@ -459,7 +496,7 @@ ${DIM}  2) npx skills add <owner/repo@skill>${RESET}`;
     console.log(agentTip);
     console.log();
   }
-  const selected = await runSearchPrompt();
+  const selected = await runSearchPrompt(mode);
 
   // Track telemetry for interactive search
   track({
